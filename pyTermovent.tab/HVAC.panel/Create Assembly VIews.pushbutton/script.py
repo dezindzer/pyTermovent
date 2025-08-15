@@ -1,43 +1,79 @@
 
 # This Python file uses the following encoding: utf-8
+from pyrevit import revit, DB, script, forms
+#from pyrevit.framework import List
+from itertools import izip
+from rpw.ui.forms import FlexForm, Label, TextBox, Button, ComboBox, Separator, CheckBox
+import sys, clr
 from Autodesk.Revit.DB import *
+from Autodesk.Revit.DB import FilteredElementCollector, BuiltInParameter, BuiltInCategory, ElementId, AssemblyDetailViewOrientation, XYZ
 from Autodesk.Revit.UI import *
 from Autodesk.Revit.UI.Selection import *
-from Autodesk.Revit.DB import Transaction
-import Autodesk.Revit.DB as DB
 from System.Collections.Generic import List # type: ignore
 
-from Autodesk.Revit.DB import FilteredElementCollector
-from Autodesk.Revit.DB import BuiltInParameter ,BuiltInCategory
-from Autodesk.Revit.DB import ElementId
-from Autodesk.Revit.DB import AssemblyDetailViewOrientation,XYZ
-from pyrevit import revit, DB, forms
 doc = revit.doc
-import json
-import clr
-from collections import Counter
-
 clr.AddReference('RevitAPIUI')
 uidoc=__revit__.ActiveUIDocument # type: ignore
+def Canceled():
+    forms.alert('User canceled the operation', title="Canceled", exitscript=True)
+#    Canceled() 
+
 selectionhand=[doc.GetElement(id) for id in __revit__.ActiveUIDocument.Selection.GetElementIds()] # type: ignore
 
-view_templates = FilteredElementCollector(doc).OfClass(View).ToElements()
-view_template_name_3D= "HANGER 3D Ortho" #
-view_template_3D = [v for v in view_templates if v.IsTemplate and v.Name == view_template_name_3D][0]
-view_template_name_Sec= "HANGER Section" #
-view_template_Sec = [v for v in view_templates if v.IsTemplate and v.Name == view_template_name_Sec][0]
-view_template_name_Sec= "HANGER TEMPLATE" #
-view_template_SCH = [v for v in view_templates if v.IsTemplate and v.Name == view_template_name_Sec][0]
 
-title_block = None
-for symbol in FilteredElementCollector(doc).OfClass(FamilySymbol).OfCategory(BuiltInCategory.OST_TitleBlocks):
-    if symbol.FamilyName == "TERMOVENT - Title Block A3":  # Replace with the name of your desired title block
-        title_block = symbol
-        break
+viewPlans = FilteredElementCollector(doc).OfClass(ViewPlan) 
+viewports = FilteredElementCollector(doc).OfClass(Viewport) 
+
+def vPt(ViewTypez):
+    return {v.Name: v for v in viewPlans if v.IsTemplate == True and v.ViewType == ViewTypez}
+
+#Dictionary
+floorplan_template_dict = vPt(ViewType.FloorPlan)
+floorplan_template_dict["<None>"] = None
+section_template_dict = vPt(ViewType.Section)
+section_template_dict["<None>"] = None
+threeD_template_dict = vPt(ViewType.ThreeD)
+threeD_template_dict["<None>"] = None
+schedule_template_dict = vPt(ViewType.Schedule)
+schedule_template_dict["<None>"] = None
+titleblocks = DB.FilteredElementCollector(revit.doc).OfCategory(DB.BuiltInCategory.OST_TitleBlocks).WhereElementIsElementType()
+tblock_dict = {'{}: {}'.format(tb.FamilyName, revit.query.get_name(tb)): tb for tb in titleblocks}
+tblock_dict["<None>"] = None
 
 schedule_category_id = ElementId(BuiltInCategory.OST_MechanicalEquipment)
 elements= List[ElementId]()
-    
+
+#Define menu
+
+components = [
+    Label ("Select Titleblock"),
+    ComboBox(name="tb", options=sorted(tblock_dict)), #default="Papir A2: A2 - SRB"),
+    Separator(),
+    Label("View Template for Floor Plans"),
+    ComboBox(name="vt_floor_plans", options=sorted(floorplan_template_dict)), #default="Osnova 1.50"),
+    Label("View Template for Sections Plans"),
+    ComboBox(name="vt_section_plans", options=sorted(section_template_dict)),
+    Label("View Template for 3D Views"),
+    ComboBox(name="vt_3d_views", options=sorted(threeD_template_dict)),
+    Separator(),
+	Label("View Template for Schedule"),
+    ComboBox(name="vt_schedule", options=sorted(schedule_template_dict)),
+    Label(""),
+    CheckBox(name="Breskvica", checkbox_text="Play me", default=True),
+    Button("Ok")
+]
+
+form = FlexForm("View Settings", components)
+
+viewSettings = form.show()
+
+if viewSettings == True:
+    chosen_tb = tblock_dict[form.values["tb"]]
+    chosen_vt_floor_plan = floorplan_template_dict[form.values["vt_floor_plans"]]
+    chosen_vt_section_plan = section_template_dict[form.values["vt_section_plans"]]
+    chosen_vt_3d_view = threeD_template_dict[form.values["vt_3d_views"]]
+    chosen_vt_schedule = schedule_template_dict[form.values["vt_schedule"]]
+
 for elementi in selectionhand:
 	print(elementi)
 	# Get all member IDs of the assembly
@@ -61,15 +97,15 @@ for elementi in selectionhand:
 			print(elementi.Name)
 			try:
 				orth_view = AssemblyViewUtils.Create3DOrthographic(doc, elementi.Id)
-				orth_view.ApplyViewTemplateParameters(view_template_3D)
+				orth_view.ApplyViewTemplateParameters(chosen_vt_3d_view)
 				elFront_view = AssemblyViewUtils.CreateDetailSection(doc, elementi.Id, AssemblyDetailViewOrientation.ElevationFront)
-				elFront_view.ApplyViewTemplateParameters(view_template_Sec)
+				elFront_view.ApplyViewTemplateParameters(chosen_vt_section_plan)
 				elLeft_view = AssemblyViewUtils.CreateDetailSection(doc, elementi.Id, AssemblyDetailViewOrientation.ElevationLeft)
-				elLeft_view.ApplyViewTemplateParameters(view_template_Sec)
-				schedule = AssemblyViewUtils.CreateSingleCategorySchedule(doc,elementi.Id,schedule_category_id)
-				schedule.ApplyViewTemplateParameters(view_template_SCH)
+				elLeft_view.ApplyViewTemplateParameters(chosen_vt_section_plan)
+				schedule = AssemblyViewUtils.CreateSingleCategorySchedule(doc, elementi.Id, schedule_category_id)
+				schedule.ApplyViewTemplateParameters(chosen_vt_schedule)
 				schedule.Name = elementi.Name + " HANGER PARTLIST"
-				sheet = AssemblyViewUtils.CreateSheet(doc, elementi.Id, title_block.Id)
+				sheet = AssemblyViewUtils.CreateSheet(doc, elementi.Id, chosen_tb.Id)
 				sheet.Name ="SKLOPNI CRTEZ"
 				sheet.SheetNumber = elementi.Name
 				
