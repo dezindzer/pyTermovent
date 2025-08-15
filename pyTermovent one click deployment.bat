@@ -1,9 +1,9 @@
 @echo off
 color 60
-title TermoventHVAC Installer
-echo Installing TermoventHVAC
+title pyTermovent Installer
+echo Installing pyTermovent
 
-pyrevit extend ui pyTermovent "https://github.com/dezindzer/TermoventHVAC.git" --branch=main &cls
+pyrevit extend ui pyTermovent "https://github.com/dezindzer/pyTermovent.git" --branch=main &cls
 
 echo Installation done
 timeout 3 
