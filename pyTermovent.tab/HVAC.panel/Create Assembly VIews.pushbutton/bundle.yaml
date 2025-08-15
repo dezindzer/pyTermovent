@@ -1,0 +1,13 @@
+title: 
+  en_us: Create Assembly Views
+
+tooltip:
+  en_us: Create assembly views from the selected families.
+
+# bundle author
+author: Nikola Marković, Aleksa Stanojević
+
+# minimium supported Revit version
+min_revit_version: 2022
+
+context: selection
