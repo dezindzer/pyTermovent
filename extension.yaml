@@ -1,0 +1,16 @@
+builtin: false
+default_enabled: true
+type: extension
+rocket_mode_compatible: true
+name: TermoventHVAC
+description: Set of custom tools
+author: Nikola Marković
+author_profile: https://github.com/dezindzer
+url: https://github.com/dezindzer/TermoventHVAC.git
+website: https://www.linkedin.com/in/nikmark/
+
+# image: http://dezindzer.com/res/Workflow321.svg
+
+# dependencies:
+#   - ExtensionName
+#   - ExtensionName
