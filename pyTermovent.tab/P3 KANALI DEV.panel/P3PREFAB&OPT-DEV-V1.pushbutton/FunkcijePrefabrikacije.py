@@ -1,0 +1,332 @@
+# This Python file uses the following encoding: utf-8
+from Autodesk.Revit.DB import *
+from System.Collections.Generic import List
+import Autodesk.Revit.DB as DB
+uidoc = __revit__.ActiveUIDocument
+doc = __revit__.ActiveUIDocument.Document
+from Autodesk.Revit.DB.Mechanical import Duct
+from pyrevit import forms
+from DodatneFunkcijePrefabSplit import SortedPoints,placeFittingAndLength
+from SpajanjeKanalaSaUbodom import SpojKanalaIuboda
+from KratkiKanaliFunkcije import KratakKanal_DodatakNaFiting
+from PrirubniceSetFunkcija import NadjiPrirubniceSET
+
+###--------------------SETUJE TRANSAKCIJI OPCIJE DA NE IZBACUJE UPOZORENJA -OVAJ TIP TRANSAKCIJE SE RADI DA BISMO IZBEGLI WARNING PORUKU U PROMENITI TIPA KANALA
+class AutoAcceptWarnings(DB.IFailuresPreprocessor):
+    def PreprocessFailures(self, failuresAccessor):
+        # Get all failure messages
+        failures = failuresAccessor.GetFailureMessages()
+        for failure in failures:
+            failuresAccessor.DeleteWarning(failure)
+        return DB.FailureProcessingResult.Continue  # Continue the transaction and "click OK"
+###--------------------SETUJE TRANSAKCIJI OPCIJE DA NE IZBACUJE UPOZORENJA
+
+def GenericDuctSplitAndPrefab(duct,familytype,DTtapfamtype,splitl=1210.5):
+    '''FUNKCIJA ZA DELJENJE KANALA NA STANDARDNE DELOVE I DODAVANJE FITTINGA IZABRANOG TIPA
+    -duct: kanal koji se deli
+    -familytype: tip standardne familije koja se dodaje
+    -splitl: duzina deljenja kanala    
+    ''' 
+    from Autodesk.Revit.DB import Line
+    import math
+    endIsConnected,startIsConnected = False,False     
+    endrefconn,startrefconn=None,None  
+    ListOfPoints=[]
+    ductline = duct.Location.Curve
+    ductStartPoint = ductline.GetEndPoint(0)
+    ductEndPoint = ductline.GetEndPoint(1)
+    pravac=ductline.Direction
+    DL=Line.CreateBound(ductStartPoint,ductEndPoint)
+    duzina=ductline.Length*304.8
+    minduzina=400
+    TAPSCons={}
+    if duct.DuctType.GetParameters('Model')[0].AsString()!='P3 - Rectangular':
+        return False
+    for conn in duct.ConnectorManager.Connectors:  
+        if conn.ConnectorType == ConnectorType.Curve:  # Trazi tip konektora koji je Curve i nije End tip konektora -(Tap konektor sa strane kanala)
+            for Cconn in conn.AllRefs:
+                if Cconn.ConnectorType == ConnectorType.Logical or Cconn.Owner.Id.IntegerValue == duct.Id.IntegerValue :
+                    continue
+                if Cconn.Shape==ConnectorProfileType.Round:
+                    TAPSCons[Cconn]=[Cconn.Origin,(Cconn.Radius)*2,DL.Project(Cconn.Origin).Parameter]##TREBA DODATI KRUZNI UBOD ili vise uboda razlicitih oblika
+                elif Cconn.Shape==ConnectorProfileType.Rectangular or Cconn.Shape==ConnectorProfileType.Oval:
+                    dp=abs(pravac.DotProduct(Cconn.CoordinateSystem.BasisX))
+                    if dp>=1:
+                        TAPSCons[Cconn]=[Cconn.Origin,Cconn.Width,DL.Project(Cconn.Origin).Parameter]
+                    elif dp==0:
+                        TAPSCons[Cconn]=[Cconn.Origin,Cconn.Height,DL.Project(Cconn.Origin).Parameter]
+                    else:
+                        d=math.sqrt((Cconn.Width)*2+(Cconn.Height)*2)   #dijagonala
+                        TAPSCons[Cconn]=[Cconn.Origin,d,DL.Project(Cconn.Origin).Parameter]
+
+        elif conn.Origin.DistanceTo(ductEndPoint) < 5/304.8 and conn.IsConnected:
+            endIsConnected = True
+            for refconn in conn.AllRefs:
+                    if refconn.ConnectorType != ConnectorType.Logical and refconn.Owner.Id.IntegerValue != duct.Id.IntegerValue:
+                        endrefconn = refconn  #OVO JE Konektor koji je povezan sa konektorom na kraju kanala
+        elif conn.Origin.DistanceTo(ductStartPoint) < 5/304.8 and conn.IsConnected:
+                startIsConnected = True
+                for refconn in conn.AllRefs:
+                    if refconn.ConnectorType != ConnectorType.Logical and refconn.Owner.Id.IntegerValue != duct.Id.IntegerValue:
+                        startrefconn = refconn  #OVO JE Konektor koji je povezan sa konektorom na pocetku kanala
+        else :
+            continue
+###OVAJ DEO KODA PROVERA INICIJALNE KONEKTOVANE ELEMENTE I PROVERAVA DA LI SU IZ P3 PORODICE JER TO MENJA PREDLOG TRACAKA PODELE KANALA. AKO SU OBA P3 ONDA SE MALI DODATAK PRERASPDELJUJE NA NJIH
+    PrikljuceniKonektori=[]
+    try:   
+        StartFamilyOwner=startrefconn.Owner
+        PrikljuceniKonektori.append(startrefconn)
+        StartP3code=StartFamilyOwner.Symbol.GetParameters('P3 - Code')[0].AsInteger()
+    except:
+        StartP3code=None
+        StartFamilyOwner=None
+    try:   
+        EndFamilyOwner=endrefconn.Owner
+        PrikljuceniKonektori.append(endrefconn)
+        EndP3code=EndFamilyOwner.Symbol.GetParameters('P3 - Code')[0].AsInteger()
+    except:
+        EndP3code=None
+        EndFamilyOwner=None
+#####################################################################################
+    #OVDE DODATI ANALIZU PRIKLJUCENIH KOMADA 
+    ###########################################
+
+    ###--------ANALIZA TACAKA I POZICIJA UBODA I ADAPTACIJA --------------
+    TAPSConsSortedTuple =sorted(TAPSCons.items(), key=lambda item: item[1][2])
+    nedozvoljenaDistanca=[(tap[1][2]-tap[1][1]/2-0.6,tap[1][2]+tap[1][1]/2+0.6) for tap in TAPSConsSortedTuple] #tap[1][2]- LOKACIJA/PARAMETAR NA LINIJI , tap[1][1]-SIRINA/VISINA/RADIJUS TAPA
+    ##############################################-DEO KODA ODGOVORAN ZA PRAVLJENJE SPLIT TACAKA ZA DELJENJE-#########################################
+    def is_valid(p):
+        '''FUNKCIJA PROVERAVA DA LI JE INPUT BROJ U OPSEGU DVA BOJA JEDNE TUPLE  (start <= p < end) '''
+        return 0 <= p <= duzina/304.8 and all(not (start <= p < end) for start, end in nedozvoljenaDistanca)
+    #### NAREDNI DEO KODA POSTAVLJA TACKE DA OBILAZI LISTU TAPOVA ######
+    Nt=[]
+    tacka=0
+    while tacka<duzina/304.8:
+        pomeraj=0
+        tacka+=splitl/304.8
+        if tacka>duzina/304.8:
+            break
+        Validna=is_valid(tacka)
+        staraTacka=tacka
+        while not Validna :
+            tacka-=0.0164041995
+            pomeraj+=0.0164041995
+            Validna=is_valid(tacka)
+            if pomeraj>(splitl/304.8-0.656167979):       # OVO ZNACI DA TACKA U LEVO NEMA REZULTATA I DA TREBA ICI U DESNO I NAPRAVITI KANAL VAN STANDARDA I GABARITA
+                Validna=is_valid(staraTacka)                
+                while not Validna:
+                    staraTacka+=0.0164041995
+                    Validna=is_valid(staraTacka)
+                else:
+                    tacka=staraTacka
+        Nt.append(tacka)
+    # NACI I POKUSATI DOTERATI DEONICU DA IMA STO VISE CELIH KOMADA KANALA I DA PRVA I POSLEDNJA BUDU OSTACI DODELJIVI FITINZIMA
+    Nt.insert(0,0)
+    Nt.append(duzina/304.8)    
+###############################OVDE TREBA SWITCHEM ODREDITI DA LI JE POTREBAN SLEDECI KORAK ILI NE    
+#IDEJA JE DA AKO NIJE BILO POMERAJA U PRETHODNOM KORAKU NEMA POTREBE ZA JOS JEDNOM ITERACIOM I AKO MANIPULISEMO POCETNIK I KRAJNJIM FITINGOM ZBOG OZBACIVANJE KRATKE DEONICE
+
+    for p,point in enumerate(Nt[::-1]):     #pokrece se petlja od pozadi od liste Nt    
+        if p==0 or p==len(Nt)-1:           #preskacemo prvu i poslednju tacku    
+            continue
+        distanca=Nt[len(Nt)-p]-Nt[len(Nt)-p-1]        #distanca izmedju tacke i tacke pre
+        if distanca<0.0656167979:                       #ako je distanca manja od 20mm-Mnogo je mali kanal da bi se familija uopste postavila
+            Nt[len(Nt)-p-1]=point-0.0656167979          #tacka se pomera u levo za 20mm kako bi se napravila neophodna distanca za kreiranje dummy kanala
+        PrivPoint=point-(splitl/304.8-distanca)       #KREIRA SE IDEALNA TACKA
+        if is_valid(PrivPoint):                       #provera IDEALNE tacke
+            Nt[len(Nt)-p-1]=PrivPoint                 #Ako IDEALNA TACKA nije validna pokrece se While loop koji trazi najbolje resenje
+        else:
+            while distanca<=splitl/304.8:                #pomera tacku u levo sve dok ne pridje sto je vise moguce u levo do vrednosti distance
+                if is_valid(point):                      #pomera u levo sve dok je ispunjen uslov validnosti tacke u pogledu tapova
+                    point-=0.000328084
+                    distanca=Nt[len(Nt)-p]-point
+                else:
+                    break
+        if (((splitl-0.5)/304.8<distanca<(splitl+0.5)/304.8)):
+            Nt[len(Nt)-p-1]=Nt[len(Nt)-p]-splitl/304.8      
+        else:
+            continue
+    
+    Nt.pop(0) 
+    Nt.pop(len(Nt)-1)
+##############################################-DEO KODA ODGOVORAN ZA PRAVLJENJE SPLIT TACAKA ZA DELJENJE-######################################### 
+    tacke=[pravac.Multiply(i) for i in Nt]
+    tacke.append(pravac.Multiply(duzina/304.8))    #dodavanje kraja
+    ListOfPoints=[ductStartPoint.Add(tacka) for tacka in tacke ]
+    pointlist = SortedPoints(ListOfPoints,ductStartPoint)#sort the points from start of duct to end of duct
+    newFittings = []
+    NewFittingsDuctsTaps={}
+    NewFittingsDucts=[]
+    NewFittingsDuctsSHORT=[]
+    tempStartPoint = ductStartPoint
+    lineDirection = ductline.Direction
+
+    for i,p in enumerate(pointlist):		
+        DtLine=Line.CreateBound(tempStartPoint, p)  #pravi liniju izmedju dve tacke
+        LLenPola=DtLine.Length/2                      #sredina linije
+        point=DtLine.Evaluate(LLenPola,False)         #tacka na sredini linije
+        tempL=p.DistanceTo(tempStartPoint)             #duzina linije izmedju dve tacke tj. duzina kanala
+        output = placeFittingAndLength(duct,point,familytype,lineDirection,tempL,"P3 - TotalLength") 
+        newfitting = output.keys()[0]  #vraca novi fitting
+        newFittings.append(newfitting)
+        fittingpoints = output.values()[0] #vraca tacke konektora fittinga
+        doc.Regenerate()
+        ####----------------######
+        ######### SVE UBODE KOJI SE UBADAJU U OVAJ SEKTOR IZMEDJU TACAKA(KANAL) STAVLJA U NewFittingsDuctsTaps DICTIONARY KAKO BI KASNIJE MOGAO DA PROMENI TIP I DODELI UBODE U FAMILIJI KANALA  
+        if len(TAPSCons)!=0:       #proverava da li ima uboda
+            a=DtLine.GetEndPoint(0)   #pocetna tacka kanala
+            IntersectionA=DtLine.Project(a).Parameter   #projekcija tacke A na liniju
+            b=DtLine.GetEndPoint(1)   #krajnja tacka kanala
+            IntersectionB=DtLine.Project(b).Parameter   #projekcija tacke B na liniju
+            DtLine.MakeUnbound() # Skidamo granice krivoj DtLine Tako da moze u sledecem koraku da da Parametar van granica pocetne i krajnje tacke
+            for tapConn in TAPSCons: #prolazi kroz sve konektore Tapova i proverava da li su njihove pozijcije u opsegu tacke A i B
+                Intersection=DtLine.Project(tapConn.Origin).Parameter
+                if IntersectionA<Intersection<IntersectionB: #proverava da li je ubod u opsegu tacke A i B (Proverava da li JE UBOD NA OVOM KANALU)
+                    if newfitting in NewFittingsDuctsTaps:  
+                        NewFittingsDuctsTaps[newfitting].append(tapConn.Owner)   #ukoliko je dodat vec u listu dodaje sledeci ubod    new fitting je kanal za ubadanje
+                    else:
+                        NewFittingsDuctsTaps[newfitting]=[tapConn.Owner]      #dodaje novi ubod u listu uboda      new fitting je kanal za ubadanje
+                    newfitting.ChangeTypeId(DTtapfamtype.Id)   # PROMENA TIPA OBICNOG KANALA U KANAL SA UBODIMA
+                    ###### RESETUJE SVE UBODE DA SE NE VIDE DO FUNKCIJE UBADANJA
+                    for h in range(1,11):    #prolazi kroz sve Visibility paramtetre Tapova i stavlja na 0 
+                        sTv0='TapVis'+str(h)  #kreira ime parametra Visibility uboda
+                        newfitting.GetParameters(sTv0)[0].Set(0)    #setuje vrednost uboda
+                    ###### RESETUJE SVE UBODE DA SE NE VIDE DO FUNKCIJE UBADANJA
+                else:
+                    if tempL*304.8<=minduzina-5:
+                        NewFittingsDuctsSHORT.append(newfitting) #dodaje fitting u listu samo ako je manji od 400mm
+                    else:
+                        NewFittingsDucts.append(newfitting)
+            doc.Regenerate()
+        else:             
+            if tempL*304.8<=minduzina-5:
+                NewFittingsDuctsSHORT.append(newfitting) #dodaje fitting u listu samo ako je manji od 400mm
+            else:
+                NewFittingsDucts.append(newfitting)
+        ######### SVE UBODE KOJI SE UBADAJU U OVAJ SEKTOR IZMEDJU TACAKA(KANAL) STAVLJA U NewFittingsDuctsTaps DICTIONARY KAKO BI KASNIJE MOGAO DA PROMENI TIP I DODELI UBODE U FAMILIJI KANALA 
+        tempPoints = SortedPoints(fittingpoints,ductStartPoint) #sortira tacke konektora fittinga u odnosu na pocetnu tacku kanala
+        tempStartPoint=tempPoints[1] #nova pocetna tacka je druga tacka konektora fittinga
+        
+        if i != 0:
+            fittingconns1 = newFittings[i-1].MEPModel.ConnectorManager.Connectors
+            fittingconns2 = newFittings[i].MEPModel.ConnectorManager.Connectors
+            for conn in fittingconns2:
+                for DuctFitConn in fittingconns1:
+                    if DuctFitConn.Origin.DistanceTo(conn.Origin) < 5/304.8:    #ako su konektori blizu povezi ih
+                        DuctFitConn.ConnectTo(conn)
+                        break
+    
+    doc.Delete(duct.Id)        #brise originalni kanal koji je podeljen     
+    doc.Regenerate()       
+    if startIsConnected:    # ukoliko je kanal bio povezan sa necim na pocetku sada povezi prvi fitting sa tim
+        for conn in newFittings[0].MEPModel.ConnectorManager.Connectors:
+            if conn.Origin.DistanceTo(startrefconn.Origin) < 5/304.8:  ##proverava da li je konektor blizu
+                startrefconn.ConnectTo(conn) # povezivanje konektora
+                break 
+    
+    if endIsConnected: # ukoliko je kanal bio povezan sa necim na kraju sada povezi poslednji fitting sa tim
+        for conn in newFittings[-1].MEPModel.ConnectorManager.Connectors:
+            if conn.Origin.DistanceTo(endrefconn.Origin) < 5/304.8: ##proverava da li je konektor blizu
+                endrefconn.ConnectTo(conn)  # povezivanje konektora
+                break
+    
+    return NewFittingsDuctsTaps, NewFittingsDucts, NewFittingsDuctsSHORT #vraca listu fittinga i listu ductova koji su dodati u funkciji placeFittingAndLength
+
+def PrefabrikovanjeElemenata(SelektovaniKanali):
+    '''OVA FUNKCIJA SE POKRECE NA LISTU SELEKTOVANIH P3 Duct KANALA I PREFABRIKUJE IH U DuctFitting ELEMENTE
+    -Selektovani Kanali- INPUT SELEKCIJE IZ REVITA'''
+    Tipovi=FilteredElementCollector(doc).WhereElementIsElementType()
+    for i in Tipovi:
+        if i.FamilyName=='P3 - Straight Duct' :
+            DTfamtype=i
+        elif i.FamilyName=='P3 - Straight Duct-Tap Alt' :
+            DTtapfamtype=i
+            break
+    if(len(SelektovaniKanali))==0:
+        return []
+    Tr=Transaction(doc, "P3 - PREFABRICATION")  #--TRANSAKCIJA
+    Tr.Start()   #--TRANSAKCIJA
+    options = Tr.GetFailureHandlingOptions() # Get the current failure handling options 
+    options = options.SetFailuresPreprocessor(AutoAcceptWarnings())  # Set the preprocessor
+    Tr.SetFailureHandlingOptions(options) # Set the new options to the transaction
+    count=0
+    maxelements=len(SelektovaniKanali) # maximalan broj elemenata
+    with forms.ProgressBar(title='P3 - PREFABRICATION PROGRESS : No Of Elements: '+str(maxelements), cancellable=True) as pb:
+        for kanal in SelektovaniKanali: #--prolazi kroz sve selektovane kanale  
+            if pb.cancelled:
+                Tr.RollBack() #--TRANSAKCIJA
+                uidoc.Selection.SetElementIds(List[ElementId]())  # --brisanje selekcije kako ne bi ostali selektovani elementi nakon zavrsetka
+            count += 1
+            pb.update_progress(count,maxelements) # --progres bar
+            ##OVDE STAVITI PREFERIRANU DUZINU KANALA- OVAJ PROCES MOZE BITI IZOPSTEN IZ FUNKCIJE I STAVITI NA INPUT U SCRIPT Fajlu.
+            W=kanal.GetParameters('Width')[0].AsDouble()*304.8+20
+            H=kanal.GetParameters('Height')[0].AsDouble()*304.8+20
+            if W>1200 or H>1200:
+                DuctSplitLength=1210.5
+            else:
+                DuctSplitLength=4010.5
+            #DuctSplitLength=1010.5    # ovo je za testiranje
+            SubTrPrefab=SubTransaction(doc)    # U SUBTRANSAKICIJI SE MENJA TIP KANALA U KANAL SA TAPOVIMA ### PROBLEM JE BIO DA PORED REDUKCIJE PROMENI TIP. ZATO SE MENJA POD SUBTRANSAKCIJOM
+            SubTrPrefab.Start()
+            try:
+                NewPrefabFittings=GenericDuctSplitAndPrefab(kanal,DTfamtype,DTtapfamtype,DuctSplitLength)  #--poziva funkciju za deljenje kanala i dodavanje fittinga
+                SubTrPrefab.Commit()
+            except:
+                SubTrPrefab.RollBack()
+                print('GRESKA U PREFABU')
+                break
+            
+            PrefabDuctsTaps=NewPrefabFittings[0]
+            PrefabDucts=NewPrefabFittings[1]  
+            PrefabDuctsShort=NewPrefabFittings[2]
+
+            if len(PrefabDuctsTaps)>0:
+                for f,fitting in enumerate(PrefabDuctsTaps):  #--prolazi kroz sve fittinge i dodaje im tapove      fitting je DUCT TAP ALT
+                    selekcijaZaSpajanjeTapa=PrefabDuctsTaps[fitting]  # selekcija kanala i uboda koji treba spojiti   (FORMA DICT-a [Kanal]-ubodi)
+                    selekcijaZaSpajanjeTapa.append(fitting) #--dodaje fitting u selekciju
+                    SubTrUbod=SubTransaction(doc)
+                    SubTrUbod.Start()
+                    try:
+                        spoj=SpojKanalaIuboda(selekcijaZaSpajanjeTapa) #--poziva funkciju za spajanje kanala i uboda
+                        SubTrUbod.Commit()
+                    except:
+                        print('GRESKA -- SpojKanalaIuboda')
+                        SubTrUbod.RollBack()
+                        continue
+            
+            if len(PrefabDuctsShort)>0:
+                for s,short in enumerate(PrefabDuctsShort):      
+                    SubTr=SubTransaction(doc)
+                    SubTr.Start()
+                    try:
+                        KratakUFiting=KratakKanal_DodatakNaFiting(short)
+                        SubTr.Commit()
+                    except:
+                        print('GRESKA -- KratakKanal_DodatakNaFiting')
+                        SubTr.RollBack()
+                        continue
+            
+            kanal.Dispose()
+
+        else:
+            Tr.Commit()
+            uidoc.Selection.SetElementIds(List[ElementId]()) # --brisanje selekcije kako ne bi ostali selektovani elementi nakon zavrsetka
+            return  PrefabDucts+PrefabDuctsTaps.keys()
+
+if __name__ == '__main__': #GLAVNI PROGRAM - OVDE TREBA ANALIZIRATI KANALE I POZIVATI FUNKCIJU ZA DELJENJE KANALA NA DUZINE I DODAVANJE FITTINGA
+        from Autodesk.Revit.DB.Mechanical import Duct
+        from pyrevit import forms
+        try:
+            SelektovaniKanali = [el for el in FilteredElementCollector(doc, uidoc.Selection.GetElementIds()).OfClass(Duct).ToElements() if el.DuctType.GetParameters('Model')[0].AsString()=='P3 - Rectangular']
+            if len(SelektovaniKanali)>0:
+                Prefabrikovani=PrefabrikovanjeElemenata(SelektovaniKanali)
+            else:
+                 forms.alert("ODABIR JE PRAZAN! IZABERI P3 ELEMENTE ZA PREFABRIKACIJU")
+        except:
+            forms.alert("ODABIR JE PRAZAN! IZABERI P3 ELEMENTE ZA PREFABRIKACIJU")
+            SelektovaniKanali = []
+
+
+
+
+            
